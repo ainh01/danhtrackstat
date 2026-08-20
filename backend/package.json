@@ -1,0 +1,13 @@
+{
+  "name": "trackstat-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "trackstat backend — RAM-only pet data store for Steal An Egg",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
