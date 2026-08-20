@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>trackstat — Steal An Egg</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --border: #2a2f3a;
+    --text: #e6e9ef; --dim: #8b93a3; --accent: #4f8cff; --ok: #3fb950; --off: #6e7686;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 16px; margin: 0; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  header .spacer { flex: 1; }
+  button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); }
+  button.danger:hover { border-color: #f85149; color: #f85149; }
+  main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+  .empty { color: var(--dim); text-align: center; padding: 60px 0; }
+  .account {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    margin-bottom: 14px; overflow: hidden;
+  }
+  .account-head {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer;
+  }
+  .account-head:hover { background: var(--panel2); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--off); flex: none; }
+  .dot.online { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .uname { font-weight: 600; }
+  .stat { color: var(--dim); font-size: 12px; }
+  .stat b { color: var(--text); font-weight: 600; }
+  .chev { margin-left: auto; color: var(--dim); transition: transform .15s; }
+  .account.open .chev { transform: rotate(90deg); }
+  .pets { display: none; border-top: 1px solid var(--border); }
+  .account.open .pets { display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; background: var(--panel2); position: sticky; top: 53px; }
+  tr:last-child td { border-bottom: none; }
+  .petimg { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; background: var(--panel2); vertical-align: middle; }
+  .pname { font-weight: 600; }
+  .mut { color: var(--dim); font-size: 12px; }
+  .rarity { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; border: 1px solid var(--border); }
+  .r-Common { color: #9aa4b2; } .r-Uncommon { color: #57ab5a; } .r-Rare { color: #4f8cff; }
+  .r-Epic { color: #a371f7; } .r-Legendary { color: #d29922; } .r-Mythic { color: #f85149; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--dim); }
+  .badge.on { color: var(--ok); border-color: var(--ok); }
+  .num { font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+  .err { color: #f85149; padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>trackstat</h1>
+  <span class="sub">Steal An Egg — live pet tracker</span>
+  <span class="spacer"></span>
+  <span class="stat" id="meta"></span>
+  <button id="refreshBtn" title="Refresh now">Refresh</button>
+  <button id="resetBtn" class="danger" title="Wipe all stored data">Reset</button>
+</header>
+<main id="main"><div class="empty">Loading…</div></main>
+
+<script>
+// Backend lives on its own domain — all API calls go here (absolute URL).
+const API_BASE = "http://sae.trackstat.ninja";
+
+const RARITY_ORDER = ["Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic"];
+const main = document.getElementById("main");
+const meta = document.getElementById("meta");
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function fmt(n) {
+  if (n === null || n === undefined || isNaN(n)) return "—";
+  if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return String(Math.round(n * 100) / 100);
+}
+function iconUrl(icon) {
+  const m = String(icon || "").match(/rbxassetid:\/\/(\d+)/);
+  return m ? "https://www.roblox.com/asset/?id=" + m[1] : null;
+}
+function timeAgo(ts) {
+  if (!ts) return "—";
+  const s = Math.max(0, (Date.now() - ts) / 1000);
+  if (s < 60) return Math.floor(s) + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  return Math.floor(s / 3600) + "h ago";
+}
+
+function petRow(p) {
+  const icon = iconUrl(p.icon);
+  const img = icon
+    ? `<img class="petimg" loading="lazy" src="${esc(icon)}" alt="" onerror="this.style.display='none'">`
+    : "";
+  const muts = (p.mutations && p.mutations.length) ? p.mutations.join(" + ") : (p.baseMutation || "");
+  const badges = [
+    p.equipped ? `<span class="badge on">equipped</span>` : "",
+    p.isFavorite ? `<span class="badge on">fav</span>` : "",
+    p.inFuse ? `<span class="badge">fusing</span>` : "",
+  ].join(" ");
+  return `<tr>
+    <td>${img}</td>
+    <td><span class="pname">${esc(p.name)}</span><br><span class="mut">${esc(p.category)}${muts ? " · " + esc(muts) : ""}</span></td>
+    <td><span class="rarity r-${esc(p.rarity)}">${esc(p.rarity || "?")}</span></td>
+    <td class="num">${p.scale != null ? (+p.scale).toFixed(2) : "—"}</td>
+    <td class="num">${p.weight != null ? fmt(p.weight) + " kg" : "—"}</td>
+    <td class="num"><b>${fmt(p.perSecond)}</b>/s</td>
+    <td class="num">${fmt(p.generatedMoney)}</td>
+    <td>${esc(p.personality || "—")}</td>
+    <td>${esc(p.gender || "—")}</td>
+    <td>${badges || "—"}</td>
+    <td class="mut">${esc(p.uid)}</td>
+  </tr>`;
+}
+
+function render(data) {
+  const accounts = data.accounts || [];
+  if (!accounts.length) {
+    main.innerHTML = `<div class="empty">No accounts yet.<br><span style="font-size:12px">Waiting for the Roblox client to report…</span></div>`;
+    meta.textContent = "";
+    return;
+  }
+  const totalPets = accounts.reduce((s, a) => s + (a.petCount || 0), 0);
+  meta.textContent = `${accounts.length} account${accounts.length > 1 ? "s" : ""} · ${totalPets} pets · updated ${new Date().toLocaleTimeString()}`;
+  main.innerHTML = accounts.map((a, i) => {
+    const sorted = [...(a.pets || [])].sort((x, y) =>
+      (RARITY_ORDER.indexOf(y.rarity) - RARITY_ORDER.indexOf(x.rarity)) ||
+      ((y.perSecond || 0) - (x.perSecond || 0)));
+    return `<div class="account" id="acc-${i}">
+      <div class="account-head" onclick="document.getElementById('acc-${i}').classList.toggle('open')">
+        <span class="dot ${a.online ? "online" : ""}"></span>
+        <span class="uname">${esc(a.username)}</span>
+        <span class="stat"><b>${a.petCount}</b> pets</span>
+        <span class="stat"><b>${fmt(a.totalPerSecond)}</b>/s total</span>
+        <span class="stat">seen ${timeAgo(a.lastSeen)}</span>
+        <span class="chev">▶</span>
+      </div>
+      <div class="pets"><div class="scroll"><table>
+        <thead><tr>
+          <th></th><th>Pet</th><th>Rarity</th><th>Scale</th><th>Weight</th>
+          <th>Rate</th><th>Money</th><th>Personality</th><th>Gender</th><th></th><th>UID</th>
+        </tr></thead>
+        <tbody>${sorted.map(petRow).join("")}</tbody>
+      </table></div></div>
+    </div>`;
+  }).join("");
+}
+
+async function load() {
+  try {
+    const res = await fetch(API_BASE + "/api/accounts");
+    const data = await res.json();
+    if (data.ok) render(data);
+    else main.innerHTML = `<div class="err">Backend error: ${esc(data.error)}</div>`;
+  } catch (e) {
+    main.innerHTML = `<div class="err">Cannot reach backend: ${esc(e.message)}</div>`;
+  }
+}
+
+document.getElementById("refreshBtn").onclick = load;
+document.getElementById("resetBtn").onclick = async () => {
+  if (!confirm("Wipe ALL stored account data?")) return;
+  await fetch(API_BASE + "/api/reset", { method: "POST" });
+  load();
+};
+
+load();
+setInterval(load, 2000);
+</script>
+</body>
+</html>
