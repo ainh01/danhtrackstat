@@ -9,8 +9,8 @@ FROM node:22-alpine
 
 # backend code
 WORKDIR /app/server
-COPY backend/package.json backend/package-lock.json ./
-RUN npm ci --omit=dev
+COPY backend/package*.json ./
+RUN npm install --omit=dev
 COPY backend/app.js ./
 
 # frontend (served by app.js from ../frontend/index.html)
