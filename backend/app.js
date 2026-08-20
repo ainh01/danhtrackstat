@@ -6,6 +6,7 @@
 //   POST /api/report   { username, pets: [...] }  <- roblox executor client (every 5s)
 //   GET  /api/accounts                          -> all accounts + their pet lists
 //   GET  /api/thumb?assetIds=1,2,3              -> proxy: assetId -> Roblox thumbnail URL
+//   GET  /api/thumbimg?assetId=1                -> proxy: returns the thumbnail image BYTES
 //   POST /api/reset                             -> wipe all data
 //   GET  /                                      -> serves ../frontend/index.html
 //
@@ -123,6 +124,34 @@ app.get("/api/thumb", async (req, res) => {
     res.json({ ok: true, images });
   } catch (e) {
     res.status(502).json({ ok: false, error: "thumbnail proxy failed: " + e.message });
+  }
+});
+
+// frontend -> backend: return the actual thumbnail image BYTES for one assetId.
+// rbxcdn.com has no CORS headers, so the browser (on Vercel) can't fetch the bytes
+// directly. We proxy server-side and return the raw image; the frontend stores it as
+// an in-RAM blob URL so it loads instantly and consistently everywhere.
+app.get("/api/thumbimg", async (req, res) => {
+  const id = String(req.query.assetId || "").trim();
+  if (!/^\d{1,20}$/.test(id)) {
+    return res.status(400).json({ ok: false, error: "assetId (numeric) required" });
+  }
+  try {
+    const meta = await fetch(
+      "https://thumbnails.roblox.com/v1/assets?assetIds=" + id + "&size=420x420&format=Png"
+    );
+    const j = await meta.json();
+    const d = (j.data || [])[0];
+    if (!d || !d.imageUrl) {
+      return res.status(404).json({ ok: false, error: "no thumbnail for assetId " + id });
+    }
+    const img = await fetch(d.imageUrl);
+    const buf = Buffer.from(await img.arrayBuffer());
+    res.setHeader("Content-Type", img.headers.get("content-type") || "image/png");
+    res.setHeader("Cache-Control", "public, max-age=31536000");
+    res.send(buf);
+  } catch (e) {
+    res.status(502).json({ ok: false, error: "thumbimg failed: " + e.message });
   }
 });
 
