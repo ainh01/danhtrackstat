@@ -5,6 +5,7 @@
 // Routes:
 //   POST /api/report   { username, pets: [...] }  <- roblox executor client (every 5s)
 //   GET  /api/accounts                          -> all accounts + their pet lists
+//   GET  /api/thumb?assetIds=1,2,3              -> proxy: assetId -> Roblox thumbnail URL
 //   POST /api/reset                             -> wipe all data
 //   GET  /                                      -> serves ../frontend/index.html
 //
@@ -90,6 +91,39 @@ app.get("/api/accounts", (req, res) => {
     pets: a.pets,
   }));
   res.json({ ok: true, count: list.length, accounts: list });
+});
+
+// frontend -> backend: resolve rbxassetid(s) to Roblox thumbnail image URLs.
+// The thumbnails.roblox.com API has no CORS headers, so the browser (on Vercel)
+// can't call it directly. We proxy it server-side (no CORS restriction here) and
+// return { [assetId]: imageUrl }. The returned *.rbxcdn.com URLs load fine in <img>.
+app.get("/api/thumb", async (req, res) => {
+  const raw = String(req.query.assetIds || "");
+  const ids = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => /^\d{1,20}$/.test(s))
+    .slice(0, 100); // cap to avoid abuse
+  if (!ids.length) {
+    return res.json({ ok: true, images: {} });
+  }
+  try {
+    const url =
+      "https://thumbnails.roblox.com/v1/assets?assetIds=" +
+      ids.join(",") +
+      "&size=420x420&format=Png";
+    const r = await fetch(url);
+    const j = await r.json();
+    const images = {};
+    for (const d of j.data || []) {
+      if (d && d.targetId != null && d.imageUrl) {
+        images[String(d.targetId)] = d.imageUrl;
+      }
+    }
+    res.json({ ok: true, images });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: "thumbnail proxy failed: " + e.message });
+  }
 });
 
 // wipe all data
