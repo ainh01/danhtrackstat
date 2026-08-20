@@ -79,6 +79,7 @@ const API_BASE = "https://sae.lookstat.ninja";
 const RARITY_ORDER = ["Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic"];
 const main = document.getElementById("main");
 const meta = document.getElementById("meta");
+const panels = new Map(); // username -> panel refs (kept across refreshes)
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -90,9 +91,35 @@ function fmt(n) {
   if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + "K";
   return String(Math.round(n * 100) / 100);
 }
-function iconUrl(icon) {
+function iconId(icon) {
   const m = String(icon || "").match(/rbxassetid:\/\/(\d+)/);
-  return m ? "https://www.roblox.com/asset/?id=" + m[1] : null;
+  return m ? m[1] : null;
+}
+
+// Roblox asset thumbnails: the thumbnails.roblox.com API has no CORS headers, so we
+// resolve them through our own backend proxy (GET /api/thumb?assetIds=...) which
+// returns { [assetId]: imageUrl }. The *.rbxcdn.com URLs load fine in <img> tags.
+const thumbCache = new Map(); // assetId -> imageUrl (or null)
+async function loadPetImages(scope) {
+  const missing = [...new Set(
+    [...scope.querySelectorAll("img[data-asset]")].map((i) => i.dataset.asset)
+  )].filter((id) => !thumbCache.has(id));
+  if (!missing.length) return;
+  try {
+    const res = await fetch(API_BASE + "/api/thumb?assetIds=" + missing.join(","));
+    const data = await res.json();
+    const images = (data && data.ok) ? data.images || {} : {};
+    for (const id of missing) {
+      thumbCache.set(id, images[id] || null);
+    }
+  } catch (e) {
+    for (const id of missing) thumbCache.set(id, null);
+  }
+  // Apply whatever we now know (cached + freshly fetched).
+  for (const img of scope.querySelectorAll("img[data-asset]")) {
+    const url = thumbCache.get(img.dataset.asset);
+    if (url) img.src = url;
+  }
 }
 function timeAgo(ts) {
   if (!ts) return "—";
@@ -103,9 +130,9 @@ function timeAgo(ts) {
 }
 
 function petRow(p) {
-  const icon = iconUrl(p.icon);
-  const img = icon
-    ? `<img class="petimg" loading="lazy" src="${esc(icon)}" alt="" onerror="this.style.display='none'">`
+  const assetId = iconId(p.icon);
+  const img = assetId
+    ? `<img class="petimg" loading="lazy" data-asset="${assetId}" alt="" onerror="this.style.display='none'">`
     : "";
   const muts = (p.mutations && p.mutations.length) ? p.mutations.join(" + ") : (p.baseMutation || "");
   const badges = [
@@ -128,37 +155,83 @@ function petRow(p) {
   </tr>`;
 }
 
+function makePanel() {
+  const el = document.createElement("div");
+  el.className = "account open"; // open by default
+  el.innerHTML = `
+    <div class="account-head">
+      <span class="dot"></span>
+      <span class="uname"></span>
+      <span class="stat pets-stat"></span>
+      <span class="stat rate-stat"></span>
+      <span class="stat seen-stat"></span>
+      <span class="chev">▶</span>
+    </div>
+    <div class="pets"><div class="scroll"><table>
+      <thead><tr>
+        <th></th><th>Pet</th><th>Rarity</th><th>Scale</th><th>Weight</th>
+        <th>Rate</th><th>Money</th><th>Personality</th><th>Gender</th><th></th><th>UID</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table></div></div>`;
+  el.querySelector(".account-head").onclick = () => el.classList.toggle("open");
+  return {
+    el,
+    dot: el.querySelector(".dot"),
+    uname: el.querySelector(".uname"),
+    petsStat: el.querySelector(".pets-stat"),
+    rateStat: el.querySelector(".rate-stat"),
+    seenStat: el.querySelector(".seen-stat"),
+    tbody: el.querySelector("tbody"),
+    sig: null,
+  };
+}
+
 function render(data) {
   const accounts = data.accounts || [];
   if (!accounts.length) {
+    panels.clear();
     main.innerHTML = `<div class="empty">No accounts yet.<br><span style="font-size:12px">Waiting for the Roblox client to report…</span></div>`;
     meta.textContent = "";
     return;
   }
   const totalPets = accounts.reduce((s, a) => s + (a.petCount || 0), 0);
   meta.textContent = `${accounts.length} account${accounts.length > 1 ? "s" : ""} · ${totalPets} pets · updated ${new Date().toLocaleTimeString()}`;
-  main.innerHTML = accounts.map((a, i) => {
+
+  const seen = new Set();
+  for (const a of accounts) {
+    seen.add(a.username);
+    let p = panels.get(a.username);
+    if (!p) {
+      p = makePanel();
+      main.appendChild(p.el);
+      panels.set(a.username, p);
+    }
+    // Update header stats in place (no re-render, open state preserved).
+    p.dot.className = "dot" + (a.online ? " online" : "");
+    p.uname.textContent = a.username;
+    p.petsStat.innerHTML = `<b>${a.petCount}</b> pets`;
+    p.rateStat.innerHTML = `<b>${fmt(a.totalPerSecond)}</b>/s total`;
+    p.seenStat.textContent = "seen " + timeAgo(a.lastSeen);
+
+    // Rebuild the pet table only when the pet data actually changed.
     const sorted = [...(a.pets || [])].sort((x, y) =>
       (RARITY_ORDER.indexOf(y.rarity) - RARITY_ORDER.indexOf(x.rarity)) ||
       ((y.perSecond || 0) - (x.perSecond || 0)));
-    return `<div class="account" id="acc-${i}">
-      <div class="account-head" onclick="document.getElementById('acc-${i}').classList.toggle('open')">
-        <span class="dot ${a.online ? "online" : ""}"></span>
-        <span class="uname">${esc(a.username)}</span>
-        <span class="stat"><b>${a.petCount}</b> pets</span>
-        <span class="stat"><b>${fmt(a.totalPerSecond)}</b>/s total</span>
-        <span class="stat">seen ${timeAgo(a.lastSeen)}</span>
-        <span class="chev">▶</span>
-      </div>
-      <div class="pets"><div class="scroll"><table>
-        <thead><tr>
-          <th></th><th>Pet</th><th>Rarity</th><th>Scale</th><th>Weight</th>
-          <th>Rate</th><th>Money</th><th>Personality</th><th>Gender</th><th></th><th>UID</th>
-        </tr></thead>
-        <tbody>${sorted.map(petRow).join("")}</tbody>
-      </table></div></div>
-    </div>`;
-  }).join("");
+    const sig = JSON.stringify(sorted);
+    if (sig !== p.sig) {
+      p.sig = sig;
+      p.tbody.innerHTML = sorted.map(petRow).join("");
+      loadPetImages(p.tbody);
+    }
+  }
+  // Remove panels for accounts that disappeared (e.g. after reset).
+  for (const [name, p] of panels) {
+    if (!seen.has(name)) {
+      p.el.remove();
+      panels.delete(name);
+    }
+  }
 }
 
 async function load() {
